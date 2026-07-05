@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ava-labs/avalanchego/cache"
+	"github.com/ava-labs/avalanchego/cache/lru"
 	"github.com/ava-labs/avalanchego/ids"
 	"github.com/ava-labs/avalanchego/snow"
 	"github.com/ava-labs/avalanchego/snow/validators"
@@ -38,7 +38,7 @@ type ProposerMonitor struct {
 	validators          map[ids.NodeID]*validators.GetValidatorOutput
 	validatorPublicKeys map[string]struct{}
 
-	proposerCache *cache.LRU[string, []ids.NodeID]
+	proposerCache *lru.Cache[string, []ids.NodeID]
 
 	rl sync.Mutex
 }
@@ -51,8 +51,9 @@ func NewProposerMonitor(backend Backend, snowCtx *snow.Context) *ProposerMonitor
 			snowCtx.ValidatorState,
 			snowCtx.SubnetID,
 			snowCtx.ChainID,
+			snowCtx.Log,
 		),
-		proposerCache: &cache.LRU[string, []ids.NodeID]{Size: proposerMonitorLRUSize},
+		proposerCache: lru.NewCache[string, []ids.NodeID](proposerMonitorLRUSize),
 	}
 }
 

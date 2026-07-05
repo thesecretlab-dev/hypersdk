@@ -122,6 +122,7 @@ type VM struct {
 	metrics *Metrics
 
 	network *p2p.Network
+	peers   *p2p.Peers
 	snowCtx *snow.Context
 	DataDir string
 	tracer  avatrace.Tracer
@@ -190,6 +191,7 @@ func (vm *VM) Initialize(
 	vm.proposerMonitor = validators.NewProposerMonitor(vm, vm.snowCtx)
 
 	vm.network = snowApp.GetNetwork()
+	vm.peers = snowApp.GetPeers()
 
 	vm.genesis, vm.ruleFactory, err = vm.genesisAndRuleFactory.Load(genesisBytes, upgradeBytes, vm.snowCtx.NetworkID, vm.snowCtx.ChainID)
 	vm.GenesisBytes = genesisBytes
@@ -545,7 +547,7 @@ func (vm *VM) startNormalOp(ctx context.Context) error {
 		return nil
 	})
 
-	vm.gossiper.Start(vm.network.NewClient(txGossipHandlerID))
+	vm.gossiper.Start(vm.network.NewClient(txGossipHandlerID, p2p.PeerSampler{Peers: vm.peers}))
 	vm.snowApp.AddCloser("gossiper", func() error {
 		vm.gossiper.Done()
 		return nil

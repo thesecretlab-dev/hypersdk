@@ -83,7 +83,7 @@ func UnmarshalResult(src []byte) (*Result, error) {
 }
 
 type ExecutionResults struct {
-	Results       []*Result       `canoto:"repeated field,1"        json:"results"`
+	Results       []*Result       `canoto:"repeated pointer,1"      json:"results"`
 	UnitPrices    fees.Dimensions `canoto:"fixed repeated fint64,2" json:"unitPrices"`
 	UnitsConsumed fees.Dimensions `canoto:"fixed repeated fint64,3" json:"unitsConsumed"`
 

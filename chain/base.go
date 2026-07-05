@@ -35,8 +35,10 @@ type Base struct {
 	// If the fee is too low to pay all fees, the transaction will be dropped.
 	MaxFee uint64 `canoto:"fint64,3" json:"maxFee"`
 
-	// Base uses "noatomic" tag to ensure it can be safely passed by value (immutable)
-	canotoData canotoData_Base `canoto:"noatomic"` //nolint:revive
+	// Base is safely passed by value (immutable). canoto v0.18 makes the
+	// canotoData sentinel copyable by default (the old "noatomic" opt-out was
+	// replaced by an opt-in "nocopy"), so no tag is needed here.
+	canotoData canotoData_Base //nolint:revive
 }
 
 func (b *Base) Execute(r Rules, timestamp int64) error {

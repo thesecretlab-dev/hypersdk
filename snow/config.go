@@ -50,5 +50,7 @@ func GetProfilerConfig(config context.Config) (profiler.Config, error) {
 // GetTracerConfig returns the trace.Config. If the config does not contain a trace.Config,
 // it disables tracing.
 func GetTracerConfig(config context.Config) (trace.Config, error) {
-	return context.GetConfig(config, TracerConfigKey, trace.Config{Enabled: false})
+	// v1.14.x: trace.Config.Enabled was removed; the zero value (ExporterConfig
+	// Type == Disabled) is the disabled-tracing default.
+	return context.GetConfig(config, TracerConfigKey, trace.Config{})
 }

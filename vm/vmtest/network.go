@@ -40,7 +40,6 @@ type VM struct {
 	snowCtx   *avasnow.Context
 	nodeID    ids.NodeID
 	appSender *enginetest.Sender
-	toEngine  chan common.Message
 
 	SnowVM *snow.VM[*chain.ExecutionBlock, *chain.OutputBlock, *chain.OutputBlock]
 	VM     *vm.VM
@@ -61,8 +60,6 @@ func NewTestVM(
 	r.NoError(err)
 	snowVM := snow.NewVM("v0.0.1", vm)
 
-	toEngine := make(chan common.Message, 1)
-
 	chainID := hashing.ComputeHash256Array(genesisBytes)
 	snowCtx := snowtest.Context(t, chainID)
 	var logCores []logging.WrappedCore
@@ -82,7 +79,7 @@ func NewTestVM(
 	snowCtx.ChainDataDir = t.TempDir()
 	snowCtx.NodeID = ids.GenerateTestNodeID()
 	appSender := &enginetest.Sender{T: t}
-	r.NoError(snowVM.Initialize(ctx, snowCtx, nil, genesisBytes, upgradeBytes, configBytes, toEngine, nil, appSender))
+	r.NoError(snowVM.Initialize(ctx, snowCtx, nil, genesisBytes, upgradeBytes, configBytes, nil, appSender))
 
 	router := http.NewServeMux()
 	handlers, err := snowVM.CreateHandlers(ctx)
@@ -98,7 +95,6 @@ func NewTestVM(
 		SnowVM:    snowVM,
 		VM:        vm,
 		snowCtx:   snowCtx,
-		toEngine:  toEngine,
 		server:    server,
 	}
 }
@@ -330,8 +326,8 @@ func (n *TestNetwork) initVMNetwork(ctx context.Context, vm *VM) {
 			continue
 		}
 
-		n.require.NoError(vm.SnowVM.Connected(ctx, peer.nodeID, version.CurrentApp))
-		n.require.NoError(peer.SnowVM.Connected(ctx, vm.nodeID, version.CurrentApp))
+		n.require.NoError(vm.SnowVM.Connected(ctx, peer.nodeID, version.Current))
+		n.require.NoError(peer.SnowVM.Connected(ctx, vm.nodeID, version.Current))
 	}
 }
 
@@ -384,11 +380,14 @@ func (n *TestNetwork) SubmitTxs(ctx context.Context, txs []*chain.Transaction) {
 // verified the parent block before verifying its child.
 func (n *TestNetwork) BuildBlockAndUpdateHead(ctx context.Context) []*snow.StatefulBlock[*chain.ExecutionBlock, *chain.OutputBlock, *chain.OutputBlock] {
 	n.require.NoError(n.VMs[0].VM.Builder().Force(ctx))
-	select {
-	case <-n.VMs[0].toEngine:
-	case <-time.After(time.Second):
-		n.require.Fail("timeout waiting for PendingTxs message")
-	}
+	// v1.14.x pull model: drain the build signal via WaitForEvent (was a read on
+	// the engine-supplied toEngine channel). Bounded to 1s to catch a wiring
+	// regression that would degrade wake-on-tx to timer-only production.
+	waitCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	msg, err := n.VMs[0].SnowVM.WaitForEvent(waitCtx)
+	n.require.NoError(err, "timeout waiting for PendingTxs message")
+	n.require.Equal(common.PendingTxs, msg)
 
 	buildVM := n.VMs[0]
 	blk := buildVM.BuildAndSetPreference(ctx)

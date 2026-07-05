@@ -48,7 +48,7 @@ import (
 	"github.com/ava-labs/hypersdk/internal/cache"
 	"github.com/ava-labs/hypersdk/utils"
 
-	avacache "github.com/ava-labs/avalanchego/cache"
+	avacache "github.com/ava-labs/avalanchego/cache/lru"
 	hcontext "github.com/ava-labs/hypersdk/context"
 )
 
@@ -122,6 +122,11 @@ type namedCloser struct {
 type VM[Input Block, Output Block, Accepted Block] struct {
 	handlers        map[string]http.Handler
 	network         *p2p.Network
+	// peers is the connection-tracking handler for the network. v1.14.x requires
+	// callers to bring their own NodeSampler (p2p.PeerSampler{Peers}) to
+	// Network.NewClient; this handler, registered at NewNetwork, tracks the
+	// connected set used for that sampling.
+	peers *p2p.Peers
 	stateSyncableVM block.StateSyncableVM
 	closers         []namedCloser
 
@@ -165,7 +170,7 @@ type VM[Input Block, Output Block, Accepted Block] struct {
 	vmConfig VMConfig
 
 	// We cannot use a map here because we may parse blocks up in the ancestry
-	parsedBlocks *avacache.LRU[ids.ID, *StatefulBlock[Input, Output, Accepted]]
+	parsedBlocks *avacache.Cache[ids.ID, *StatefulBlock[Input, Output, Accepted]]
 
 	// Each element is a block that passed verification but
 	// hasn't yet been accepted/rejected
@@ -201,6 +206,14 @@ type VM[Input Block, Output Block, Accepted Block] struct {
 	tracer  trace.Tracer
 
 	shutdownChan chan struct{}
+
+	// toEngine is the VM-owned pending-work channel. v1.14.x removed the
+	// engine-supplied `chan<- common.Message` from Initialize in favor of a pull
+	// model: the builders push common.PendingTxs here and the engine drains it
+	// via WaitForEvent. Buffered (size 1) so a non-blocking builder send is not
+	// dropped when the engine is between WaitForEvent calls — this preserves
+	// wake-on-tx latency rather than degrading to timer-only block production.
+	toEngine chan common.Message
 	shutdownOnce sync.Once
 	shutdownErr  error
 
@@ -230,12 +243,14 @@ func (v *VM[I, O, A]) Initialize(
 	genesisBytes []byte,
 	upgradeBytes []byte,
 	configBytes []byte,
-	toEngine chan<- common.Message,
 	_ []*common.Fx,
 	appSender common.AppSender,
 ) error {
 	v.snowCtx = chainCtx
 	v.shutdownChan = make(chan struct{})
+	// v1.14.x pull model: own the pending-work channel and expose it via
+	// WaitForEvent (see the toEngine field comment).
+	v.toEngine = make(chan common.Message, 1)
 	v.acceptedQueue = make(chan *StatefulBlock[I, O, A], acceptedQueueSize)
 
 	hconfig, err := hcontext.NewConfig(configBytes)
@@ -288,7 +303,8 @@ func (v *VM[I, O, A]) Initialize(
 		go continuousProfiler.Dispatch() //nolint:errcheck
 	}
 
-	v.network, err = p2p.NewNetwork(v.log, appSender, defaultRegistry, "p2p")
+	v.peers = &p2p.Peers{}
+	v.network, err = p2p.NewNetwork(v.log, appSender, defaultRegistry, "p2p", v.peers)
 	if err != nil {
 		return fmt.Errorf("failed to initialize p2p: %w", err)
 	}
@@ -303,14 +319,14 @@ func (v *VM[I, O, A]) Initialize(
 		return err
 	}
 	v.acceptedBlocksByHeight = acceptedBlocksByHeightCache
-	v.parsedBlocks = &avacache.LRU[ids.ID, *StatefulBlock[I, O, A]]{Size: v.vmConfig.ParsedBlockCacheSize}
+	v.parsedBlocks = avacache.NewCache[ids.ID, *StatefulBlock[I, O, A]](v.vmConfig.ParsedBlockCacheSize)
 	v.verifiedBlocks = make(map[ids.ID]*StatefulBlock[I, O, A])
 
 	chainInput := ChainInput{
 		SnowCtx:      chainCtx,
 		GenesisBytes: genesisBytes,
 		UpgradeBytes: upgradeBytes,
-		ToEngine:     toEngine,
+		ToEngine:     v.toEngine,
 		Shutdown:     v.shutdownChan,
 		Tracer:       v.tracer,
 		Config:       v.hconfig,
@@ -582,6 +598,14 @@ func (v *VM[I, O, A]) CreateHandlers(_ context.Context) (map[string]http.Handler
 	return v.handlers, nil
 }
 
+// NewHTTPHandler satisfies the v1.14.x common.VM interface. It returns nil: this
+// VM serves its API via the path-based CreateHandlers above, and avalanchego's
+// server explicitly skips a nil header-route handler. Returning nil preserves
+// existing routing rather than adopting the additive chain-id-header route.
+func (v *VM[I, O, A]) NewHTTPHandler(_ context.Context) (http.Handler, error) {
+	return nil, nil
+}
+
 // Shutdown shuts down the VM
 func (v *VM[I, O, A]) Shutdown(context.Context) error {
 	v.shutdownOnce.Do(func() {
@@ -613,6 +637,19 @@ func (v *VM[I, O, A]) Version(context.Context) (string, error) {
 	return v.version, nil
 }
 
+// WaitForEvent implements the v1.14.x common.VM pull model: it blocks until the
+// builders signal pending work (common.PendingTxs on v.toEngine) or ctx is
+// cancelled. This replaces the removed engine-supplied toEngine channel; the
+// buffered channel preserves immediate wake-on-tx (see the toEngine field).
+func (v *VM[I, O, A]) WaitForEvent(ctx context.Context) (common.Message, error) {
+	select {
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case msg := <-v.toEngine:
+		return msg, nil
+	}
+}
+
 func (v *VM[I, O, A]) addCloser(name string, closer func() error) {
 	v.closers = append(v.closers, namedCloser{name, closer})
 }
@@ -627,6 +664,12 @@ func (v *VM[I, O, A]) GetInputCovariantVM() *InputCovariantVM[I, O, A] {
 // GetNetwork returns VM's peer to peer network
 func (v *VM[I, O, A]) GetNetwork() *p2p.Network {
 	return v.network
+}
+
+// GetPeers returns the network's connection-tracking handler, used to build the
+// p2p.PeerSampler that v1.14.x Network.NewClient requires.
+func (v *VM[I, O, A]) GetPeers() *p2p.Peers {
+	return v.peers
 }
 
 // AddAcceptedSub adds subscriptions tracking accepted blocks

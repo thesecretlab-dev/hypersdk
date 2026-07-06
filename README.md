@@ -1,3 +1,11 @@
+> [!NOTE]
+> **This is thesecretlab-dev's fork of ava-labs/hypersdk**, ported to
+> **avalanchego v1.14.2 / RPC protocol 45** (upstream pins v1.13.x). See
+> [PORT.md](./PORT.md) for the port summary and known limitations — including
+> the deferred merkledb state sync and the wire-format compatibility posture —
+> and [INVENTORY.md](./INVENTORY.md) for the full breakage inventory the port
+> was executed against. Upstream README follows unmodified.
+
 <p align="center">
   <img width="90%" alt="hypersdk" src="assets/logo.png">
 </p>

@@ -159,6 +159,31 @@ func (db *Database) DeleteRange(start, end []byte) error {
 }
 
 func (db *Database) Compact(start []byte, limit []byte) error {
+	// The database.Database spec treats a nil [limit] as a key after all keys,
+	// but pebble treats a nil [limit] as a key before all keys and requires
+	// start < limit. merkledb relies on the spec behavior (Compact(nil, nil)
+	// after a rebuild), so resolve a nil limit to the last key in the database.
+	// Mirrors avalanchego's database/pebbledb wrapper.
+	if limit == nil {
+		it, err := db.db.NewIter(&pebble.IterOptions{})
+		if err != nil {
+			return updateError(err)
+		}
+		if it.Last() {
+			limit = slices.Clone(it.Key())
+		}
+		if err := it.Close(); err != nil {
+			return updateError(err)
+		}
+		if limit == nil {
+			// Empty database; nothing to compact.
+			return nil
+		}
+	}
+	if bytes.Compare(start, limit) >= 0 {
+		// Empty key range; nothing to compact.
+		return nil
+	}
 	return updateError(db.db.Compact(start, limit, false))
 }
 

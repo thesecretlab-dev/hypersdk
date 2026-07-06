@@ -16,10 +16,13 @@ package statesync
 // whose entire chain state is days old). State sync is a scale optimization for
 // joiners of networks with deep state, which this deployment does not have.
 //
-// The deferral is LOUD, not silent: constructing a merkle syncer or registering
-// its handlers returns ErrMerkleStateSyncUnsupported so any attempt to *enable*
-// merkledb state sync fails clearly instead of silently no-op'ing. VMs that do
-// not use merkle state sync (the replay-bootstrap path) are unaffected.
+// The deferral is LOUD at the right boundary: STARTING a merkledb state sync
+// fails with ErrMerkleStateSyncUnsupported, so any attempt to *exercise* it
+// fails clearly instead of silently no-op'ing. Construction and handler
+// registration succeed (with warnings) because the VM performs both
+// unconditionally during Initialize — erroring there would break every node,
+// including the supported replay-bootstrap path. (Phase 3 finding: the
+// original construction-time error prevented VM init on a fresh chain.)
 //
 // RE-EVALUATION TRIGGER: revisit when either (a) chain state grows large enough
 // that genesis replay is too slow for new validators, or (b) avalanchego's
@@ -36,6 +39,7 @@ import (
 	"github.com/ava-labs/avalanchego/utils/logging"
 	"github.com/ava-labs/avalanchego/x/merkledb"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.uber.org/zap"
 )
 
 var _ Syncer[MerkleSyncerBlock] = (*MerkleSyncer[MerkleSyncerBlock])(nil)
@@ -53,32 +57,49 @@ type MerkleSyncerBlock interface {
 	GetStateRoot() ids.ID
 }
 
-// MerkleSyncer preserves the pre-port API surface so dependents compile, but
-// every operation fails loudly — merkledb state sync is deferred (see header).
+// MerkleSyncer preserves the pre-port API surface so dependents compile. It is
+// a disabled syncer: construction succeeds (the VM constructs it during every
+// Initialize, including on the supported replay-bootstrap path), but actually
+// STARTING a merkle sync fails loudly. The loudness boundary is the point
+// where merkledb state sync would be exercised, not VM init.
 type MerkleSyncer[T MerkleSyncerBlock] struct {
-	log        logging.Logger
-	registerer prometheus.Registerer
-	merkleDB   merkledb.MerkleDB
-	network    *p2p.Network
+	log logging.Logger
 }
 
-// NewMerkleSyncer fails loudly: enabling merkledb state sync is unsupported in
-// this port. A VM that does not use merkle state sync never calls this.
+// NewMerkleSyncer returns a disabled syncer and warns. It must not error: the
+// VM constructs it unconditionally in initStateSync, and returning an error
+// here would prevent the VM from initializing at all — including on the
+// replay-bootstrap path this port explicitly supports.
 func NewMerkleSyncer[T MerkleSyncerBlock](
-	_ logging.Logger, _ merkledb.MerkleDB, _ *p2p.Network,
+	log logging.Logger, _ merkledb.MerkleDB, _ *p2p.Network,
 	_ uint64, _ uint64, _ merkledb.BranchFactor, _ int, _ prometheus.Registerer,
 ) (*MerkleSyncer[T], error) {
-	return nil, ErrMerkleStateSyncUnsupported
+	log.Warn("merkledb state sync is deferred in this port; a state sync attempt will fail loudly (INVENTORY.md B2)")
+	return &MerkleSyncer[T]{log: log}, nil
 }
 
-func (*MerkleSyncer[T]) Start(context.Context, T) error            { return ErrMerkleStateSyncUnsupported }
-func (*MerkleSyncer[T]) Wait(context.Context) error                { return ErrMerkleStateSyncUnsupported }
-func (*MerkleSyncer[T]) Close() error                              { return nil }
-func (*MerkleSyncer[T]) UpdateSyncTarget(context.Context, T) error { return ErrMerkleStateSyncUnsupported }
-
-// RegisterHandlers fails loudly: this node cannot serve merkledb range/change
-// proofs to syncing peers (x/sync removed). Serving is unnecessary on the
-// replay-bootstrap path.
-func RegisterHandlers(_ logging.Logger, _ *p2p.Network, _ uint64, _ uint64, _ merkledb.MerkleDB) error {
+// Start is the loud gate: the engine only calls it when a state sync has
+// actually been initiated (Client.Accept past the min-blocks threshold).
+func (m *MerkleSyncer[T]) Start(_ context.Context, target T) error {
+	m.log.Error("refusing to start merkledb state sync", zap.Stringer("target", target))
 	return ErrMerkleStateSyncUnsupported
+}
+
+// Wait is only reachable while a sync is active, which Start prevents.
+func (*MerkleSyncer[T]) Wait(context.Context) error { return ErrMerkleStateSyncUnsupported }
+func (*MerkleSyncer[T]) Close() error               { return nil }
+
+// UpdateSyncTarget is invoked for every pre-ready accepted block via the
+// VM's subscription, regardless of whether a sync is active. Since Start
+// always refuses, there is never an active merkle sync to retarget — this
+// must be a silent no-op or replay bootstrap would abort.
+func (*MerkleSyncer[T]) UpdateSyncTarget(context.Context, T) error { return nil }
+
+// RegisterHandlers no-ops with a warning: this node cannot serve merkledb
+// range/change proofs to syncing peers (x/sync removed). Not serving is
+// honest — peers see no handler, the same as talking to a node without state
+// sync. It must not error, for the same reason as NewMerkleSyncer.
+func RegisterHandlers(log logging.Logger, _ *p2p.Network, _ uint64, _ uint64, _ merkledb.MerkleDB) error {
+	log.Warn("merkledb state-sync proof handlers not registered — unsupported in this port (INVENTORY.md B2)")
+	return nil
 }

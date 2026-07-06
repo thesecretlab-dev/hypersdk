@@ -20,6 +20,8 @@ change (C below). hypersdk's action/state abstractions took zero hits.
 | `529ebd3a` | **B2 — state sync deferred loudly** (see below). |
 | `5d96efd3` | **B1 — toEngine channel → `WaitForEvent` pull model** (ref: subnet-evm #1598). The VM owns a buffered(1) channel the builders push `common.PendingTxs` to; `WaitForEvent` drains it, preserving wake-on-tx latency. The vmtest harness drives `WaitForEvent` directly, so the suite exercises the pull path. |
 | `d174ab1e` | **C — block golden vector regenerated for canoto v0.18, by attested diff** (see "Wire format" below). |
+| `73ef109e` | Pebble `Compact(nil, nil)` nil-bounds fix, re-verified against v1.14.2 merkledb and carried forward from the pre-port VEIL tree. |
+| `5d6307d6` | **B2 follow-up** — found by the first real protocol-45 node start: the deferral's loudness was at construction (which the VM calls unconditionally in `initStateSync`), so it blocked VM init entirely, including on the replay-bootstrap path B2 exists to support. Moved to `Start()`, the point actually reachable only when a sync is genuinely initiated. |
 
 ## Known limitations
 
@@ -63,6 +65,59 @@ register its handlers returns `ErrMerkleStateSyncUnsupported`
 **Re-evaluation triggers:** (a) chain state grows large enough that genesis
 replay is too slow for new validators, or (b) avalanchego's Firewood-era
 state sync stabilizes into an adoptable API.
+
+### gnark / gnark-crypto pinned below avalanchego's MVS preference
+
+avalanchego v1.14.2 pulls `github.com/consensys/gnark-crypto v0.18.1` as an
+indirect dependency. veilvm (the example VM this port validates against)
+pins **gnark v0.10.0** / **gnark-crypto v0.12.2** for its zk shielded-ledger
+circuit and holds gnark-crypto there via `replace` in its own `go.mod`,
+overriding Go's MVS resolution. This is a deliberate decision, not an
+oversight:
+
+- **Why:** gnark v0.10.0's circuit/proving-key fixtures are compiled and
+  fingerprinted artifacts. Taking gnark-crypto v0.18.1 without a matching
+  gnark bump risks (or outright breaks, given the API deltas across six
+  minor versions) fixture incompatibility mid-campaign, for a dependency
+  bump that has nothing to do with the avalanchego port. The `replace` keeps
+  the zk stack byte-identical — verified: veilvm's zk test suite (fixture
+  load + proof verify) passes unchanged against the pin.
+- **Cost:** VEIL runs older gnark/gnark-crypto than upstream avalanchego's
+  own dependency graph prefers, and older than current upstream releases.
+  That is a security-relevant gap, not just a build note — see the survey
+  below.
+- **Resolution trigger:** the upgrade happens at **circuit v2** (a separate,
+  later campaign), when the shielded-ledger circuit is rewritten and its
+  fixtures (proving/verifying keys, gnark-crypto-dependent serialized
+  artifacts) are regenerated anyway. Bumping gnark/gnark-crypto opportunistically
+  before then would be exactly the kind of change this port's own
+  discipline argues against — moving a foundational dependency without a
+  reason tied to the task at hand.
+
+**Security survey (gnark v0.10.0 → current, gnark-crypto v0.12.2 → current),
+performed 2026-07-06, no upgrade taken:**
+
+| Advisory | Component | Affected | Fixed | Applies to VEIL? |
+|---|---|---|---|---|
+| GHSA-fj2x-735w-74vq — `Vector.ReadFrom` unchecked length field, OOM DoS | gnark-crypto | v0.9.1 – v0.18.0 | v0.18.1 / v0.19.1 | **Unconfirmed, treat as live risk.** VEIL's `SubmitBatchProof`/`ClearBatch` actions deserialize attacker-submitted proof + public-witness bytes — exactly the untrusted-input path this advisory targets. Not confirmed whether gnark v0.10.0's `groth16bn254.Proof.ReadFrom` / witness `UnmarshalBinary` actually route through the vulnerable `bn254/fr/vector.go` `Vector.ReadFrom`, since a Groth16 proof itself is fixed-size (no vector), but witness deserialization plausibly is. The existing `MaxProofBytesSize` (131072 bytes) cap at the action layer bounds the *total submission size* but does **not** confirmedly stop a forged internal length field from triggering an oversized allocation attempt before the read fails — the two checks are independent. **Recommended next step (not done here): a targeted fuzz/oversized-length-prefix test against the actual witness-deserialization call, before circuit v2, independent of the library bump.** |
+| GHSA-fr8m-434r-g3xp (CVE-2023-44273) — ECDSA/EdDSA deserialization missing range check | gnark-crypto | < v0.12.0 | v0.12.0 | **Not affected** — our pin (v0.12.2) is already past the fix. |
+| GHSA-pffg-92cg-xf5c — `ExpGLV` incorrect results in pairing target group GT | gnark-crypto | ≤ v0.12.0 | v0.12.1 | **Not affected** — our pin (v0.12.2) is already past the fix. Also explicitly not Groth16-verification-relevant per the advisory (G1/G2 GLV unaffected; standard `Exp`/`ExpCyclotomic` unaffected). |
+| GHSA-q3hw-3gm4-w5cr — Groth16 multi-commitment soundness break | gnark | ≤ v0.10.0 | v0.11.0 | **Version-vulnerable but not exploitable in our circuit.** Confirmed by grep: `shielded_ledger_circuit.go`/`clearhash_circuit.go` call zero `api.Commit(...)` — the circuit uses only `std/hash/sha2` and `std/math/uints` gadgets. No commitments, multiple or otherwise. |
+| GHSA-9xcg-3q8v-7fq6 — Groth16 single-commitment breaks zero-knowledge property | gnark | ≤ v0.10.0 | v0.11.0 | **Not exploitable**, same basis — no `api.Commit(...)` usage at all. |
+| GHSA-95v9-hv42-pwrj — in-circuit EdDSA/ECDSA signature malleability (missing `0 ≤ S < order` check) | gnark | < v0.13.0 | v0.14.0 | **Not exploitable in our circuit.** Confirmed by grep: no `std/signature/{eddsa,ecdsa}` usage anywhere in VEIL's circuits. hypersdk's own ed25519 auth (outside the SNARK) is unaffected — this advisory is specifically about signature checks done *inside* a gnark circuit. |
+| GHSA-9fvj-xqr2-xwg8 — fake-GLV scalar multiplication DoS/incorrectness | gnark | ≤ v0.12.0 | v0.13.0 | **Likely not applicable, not fully confirmed.** Fake-GLV is gnark's fallback for curves without native GLV endomorphism support; VEIL's circuits and verifier are BN254 (`groth16bn254`/`plonkbn254`), which has true-GLV support in gnark, so the fake-GLV code path likely isn't exercised — but the advisory text doesn't enumerate affected curves explicitly, so this is an inference, not a confirmed non-issue. |
+| GHSA-cph5-3pgr-c82g — OOM during verifying/proving-key deserialization | gnark | ≤ v0.11.0 | v0.11.1 | **Low practical exploitability.** VEIL's verifier loads its Groth16 verifying key from a local fixture path at startup (`loadGroth16VK`), not from attacker-submitted input at runtime; proving keys are prover-side/local-only and never touch the verifier's untrusted-input path. |
+
+**Net read:** the two items that matter are (1) the `Vector.ReadFrom` OOM DoS,
+which touches VEIL's actual untrusted-input surface and deserves a cheap,
+independent verification step before Fuji regardless of the gnark-crypto
+version question, and (2) the fake-GLV item, which is probably fine given
+BN254 but wasn't nailed down with full confidence. Everything else pinned
+below is either already fixed by our exact pin or structurally inapplicable
+to a circuit that does no in-circuit commitments and no in-circuit signature
+verification. None of this changes the circuit-v2 upgrade trigger; it does
+mean the OOM-DoS check on witness deserialization is worth doing sooner,
+independently, on the current pin.
 
 ### Windows: test fixtures don't build
 

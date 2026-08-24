@@ -81,7 +81,7 @@ func (k Keys) ChunkSizes() ([]uint16, bool) {
 
 // WithoutPermissions returns the keys of k as a slice with permissions removed
 func (k Keys) WithoutPermissions() []string {
-	ks := make([]string, len(k))
+	ks := make([]string, 0, len(k))
 	for key := range k {
 		ks = append(ks, key)
 	}

@@ -159,7 +159,29 @@ func (db *Database) DeleteRange(start, end []byte) error {
 }
 
 func (db *Database) Compact(start []byte, limit []byte) error {
-	return updateError(db.db.Compact(start, limit, false))
+	if db.closed.Get() {
+		return database.ErrClosed
+	}
+	end := limit
+	if end == nil {
+		// database.Database treats a nil limit as after all keys. Pebble treats
+		// a nil limit as before all keys. Use the greatest key as the limit.
+		it, err := db.db.NewIter(&pebble.IterOptions{})
+		if err != nil {
+			return updateError(err)
+		}
+		if !it.Last() {
+			return it.Close()
+		}
+		end = slices.Clone(it.Key())
+		if err := it.Close(); err != nil {
+			return err
+		}
+	}
+	if pebble.DefaultComparer.Compare(start, end) >= 1 {
+		return nil
+	}
+	return updateError(db.db.Compact(start, end, false))
 }
 
 // batch is a wrapper around a pebbleDB batch to contain sizes.

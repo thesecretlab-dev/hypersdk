@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 
 	"github.com/ava-labs/avalanchego/api/metrics"
@@ -617,12 +618,34 @@ func (vm *VM) applyOptions(o *Options) error {
 	batchedTxSerializer := &chain.BatchedTransactionSerializer{
 		Parser: vm.txParser,
 	}
+	var committee []string
+	if s := vm.config.TxGossipThresholdCommitteePublicKeys; s != "" {
+		for _, p := range strings.Split(s, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				committee = append(committee, p)
+			}
+		}
+	}
+	gossipSerializer, err := chain.NewConfiguredTxGossipSerializer(
+		batchedTxSerializer,
+		vm.config.TxGossipEncryptionKeyHex,
+		vm.config.TxGossipEncryptionRequired,
+		chain.ThresholdGossipConfig{
+			MinShares:          vm.config.TxGossipThresholdMinShares,
+			NodePrivateKeyHex:  vm.config.TxGossipThresholdNodePrivateKeyHex,
+			CommitteePublicHex: committee,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("tx gossip encryption: %w", err)
+	}
 	if o.gossiper {
 		vm.gossiper, err = gossiper.NewManual[*chain.Transaction](
 			vm.snowCtx.Log,
 			gossipRegistry,
 			vm.mempool,
-			batchedTxSerializer,
+			gossipSerializer,
 			vm,
 			vm.config.TargetGossipDuration,
 		)
@@ -635,7 +658,7 @@ func (vm *VM) applyOptions(o *Options) error {
 			vm.snowCtx.Log,
 			gossipRegistry,
 			vm.mempool,
-			batchedTxSerializer,
+			gossipSerializer,
 			vm,
 			vm,
 			vm.config.TargetGossipDuration,

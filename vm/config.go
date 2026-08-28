@@ -29,6 +29,11 @@ type Config struct {
 	StateIntermediateWriteBatchSize  int           `json:"stateIntermediateWriteBatchSize"`  // how many bytes to write from intermediate cache at once
 	ValueNodeCacheSize               int           `json:"valueNodeCacheSize"`               // how many bytes to keep in value cache
 	TargetGossipDuration             time.Duration `json:"targetGossipDuration"`
+	TxGossipEncryptionRequired       bool          `json:"txGossipEncryptionRequired"`
+	TxGossipEncryptionKeyHex         string        `json:"txGossipEncryptionKeyHex"`
+	TxGossipThresholdMinShares       int           `json:"txGossipThresholdMinShares"`
+	TxGossipThresholdNodePrivateKeyHex string      `json:"txGossipThresholdNodePrivateKeyHex"`
+	TxGossipThresholdCommitteePublicKeys string    `json:"txGossipThresholdCommitteePublicKeys"`
 }
 
 func NewConfig() Config {

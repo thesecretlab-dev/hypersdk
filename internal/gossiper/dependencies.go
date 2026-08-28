@@ -24,6 +24,12 @@ type Serializer[T any] interface {
 	Unmarshal(b []byte) ([]T, error)
 }
 
+// OutboundMessages is implemented by threshold gossip codecs that need a
+// follow-up share announcement after ingesting a ciphertext envelope.
+type OutboundMessages interface {
+	TakeOutbound() []byte
+}
+
 type Submitter[T any] interface {
 	Submit(context.Context, []T) []error
 }

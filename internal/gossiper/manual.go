@@ -115,6 +115,7 @@ func (g *Manual[T]) HandleAppGossip(ctx context.Context, nodeID ids.NodeID, msg 
 		)
 		return nil
 	}
+	flushOutbound(ctx, g.client, g.serializer)
 	g.metrics.txsReceived.Add(float64(len(txs)))
 
 	start := time.Now()
